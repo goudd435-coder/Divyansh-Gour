@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS gym_memberships (
   plan TEXT NOT NULL,
   message TEXT,
   status TEXT NOT NULL DEFAULT 'Pending',
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  start_date TIMESTAMPTZ,
+  expiry_date TIMESTAMPTZ
 );
 
 -- Enable Row Level Security (RLS)
@@ -36,7 +38,9 @@ CREATE TABLE IF NOT EXISTS enquiries (
   plan TEXT NOT NULL,
   message TEXT,
   status TEXT NOT NULL DEFAULT 'Pending',
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  start_date TIMESTAMPTZ,
+  expiry_date TIMESTAMPTZ
 );
 
 -- Enable Row Level Security (RLS)
@@ -101,7 +105,10 @@ export default function AdminDashboard() {
   // Dashboard Data State
   const [enquiries, setEnquiries] = useState<MembershipEnquiry[]>([]);
   const [contacts, setContacts] = useState<ContactMessage[]>([]);
-  const [activeTab, setActiveTab] = useState<'enquiries' | 'contacts'>('enquiries');
+  const [activeTab, setActiveTab] = useState<'enquiries' | 'contacts' | 'memberships'>('enquiries');
+  const [membershipFilter, setMembershipFilter] = useState<'All' | 'Active' | 'Expiring Soon' | 'Expired'>('All');
+  const [renewingMemberId, setRenewingMemberId] = useState<string | null>(null);
+  const [renewalPlan, setRenewalPlan] = useState<string>('Monthly');
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -466,6 +473,112 @@ export default function AdminDashboard() {
     }
   };
 
+  // Renew Membership
+  const handleRenewMembership = async (id: string, newPlan: string) => {
+    console.log('[Admin Dashboard] Renewing membership. ID:', id, 'New Plan:', newPlan);
+
+    const getPlanDays = (p: string): number => {
+      switch (p) {
+        case 'Monthly': return 30;
+        case 'Quarterly': return 90;
+        case 'Half-Yearly': return 180;
+        case 'Yearly': return 365;
+        default: return 30;
+      }
+    };
+
+    const startDate = new Date();
+    const days = getPlanDays(newPlan);
+    const expiryDate = new Date(startDate.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const updateFields = {
+      plan: newPlan,
+      start_date: startDate.toISOString(),
+      expiry_date: expiryDate.toISOString(),
+      status: 'Approved' // ensure active
+    };
+
+    try {
+      let updatedSuccess = false;
+
+      // Path 1: Direct Supabase Update
+      if (supabase) {
+        try {
+          let { data, error } = await supabase
+            .from('gym_memberships')
+            .update(updateFields)
+            .eq('id', id)
+            .select();
+
+          if (error || !data || data.length === 0) {
+            console.warn('[Admin Dashboard] Direct renewal in gym_memberships failed, trying enquiries fallback...');
+            const fallback = await supabase
+              .from('enquiries')
+              .update(updateFields)
+              .eq('id', id)
+              .select();
+            data = fallback.data;
+            error = fallback.error;
+          }
+
+          if (!error && data && data.length > 0) {
+            console.log('[Admin Dashboard] Direct Supabase renewal succeeded!');
+            updatedSuccess = true;
+          } else if (error) {
+            console.error('[Admin Dashboard] Direct Supabase renewal failed:', error.message);
+          }
+        } catch (sbErr: any) {
+          console.error('[Admin Dashboard] Exception during direct Supabase renewal:', sbErr);
+        }
+      }
+
+      // Path 2: API route fallback
+      if (!updatedSuccess) {
+        console.log('[Admin Dashboard] Falling back to backend API route for renewal...');
+        const response = await fetch(`/api/enquiries/${id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-pin': adminPin
+          },
+          body: JSON.stringify(updateFields)
+        });
+
+        if (response.ok) {
+          console.log('[Admin Dashboard] API route renewal succeeded!');
+          updatedSuccess = true;
+        } else {
+          const errText = await response.text();
+          console.error('[Admin Dashboard] API route renewal failed:', errText);
+        }
+      }
+
+      if (updatedSuccess) {
+        // Update local state
+        setEnquiries((prev) =>
+          prev.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  plan: newPlan,
+                  start_date: startDate.toISOString(),
+                  expiry_date: expiryDate.toISOString(),
+                  status: 'Approved'
+                }
+              : item
+          )
+        );
+        setRenewingMemberId(null);
+        alert(`Successfully renewed membership to the ${newPlan} Package!`);
+      } else {
+        alert('Failed to renew membership.');
+      }
+    } catch (err: any) {
+      console.error('[Admin Dashboard] Error renewing membership:', err);
+      alert(`Error renewing membership: ${err.message}`);
+    }
+  };
+
   // Delete Enquiry
   const handleDeleteEnquiry = async (id: string) => {
     if (!window.confirm('Are you absolutely sure you want to permanently delete this membership enquiry?')) return;
@@ -585,6 +698,61 @@ export default function AdminDashboard() {
     }
   };
 
+  // Helpers for remaining days & status
+  const getRemainingDays = (expiryDateStr?: string) => {
+    if (!expiryDateStr) return 0;
+    const expiry = new Date(expiryDateStr);
+    const today = new Date();
+    expiry.setHours(0, 0, 0, 0);
+    today.setHours(0, 0, 0, 0);
+    const diffTime = expiry.getTime() - today.getTime();
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  };
+
+  const getMembershipStatus = (remainingDays: number) => {
+    if (remainingDays <= 0) return 'Expired';
+    if (remainingDays <= 7) return 'Expiring Soon';
+    return 'Active';
+  };
+
+  // Select all approved members
+  const approvedMembers = enquiries.filter(e => e.status === 'Approved');
+
+  // Multi-level calculations for approved members
+  const calculatedMembers = approvedMembers.map(m => {
+    const remDays = getRemainingDays(m.expiry_date);
+    const status = getMembershipStatus(remDays);
+    return {
+      ...m,
+      remainingDays: remDays,
+      computedStatus: status
+    };
+  });
+
+  // Calculate memberships stats summary
+  const totalApprovedMembers = calculatedMembers.length;
+  const activeMembersCount = calculatedMembers.filter(m => m.computedStatus === 'Active').length;
+  const expiringSoonCount = calculatedMembers.filter(m => m.computedStatus === 'Expiring Soon').length;
+  const expiredMembersCount = calculatedMembers.filter(m => m.computedStatus === 'Expired').length;
+
+  // Sort: near expiry first (ascending remaining days)
+  const sortedMembers = [...calculatedMembers].sort((a, b) => a.remainingDays - b.remainingDays);
+
+  // Filter based on search query AND status filter
+  const filteredMembers = sortedMembers.filter(m => {
+    const matchesSearch =
+      m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      m.phone.includes(searchQuery) ||
+      m.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      m.plan.toLowerCase().includes(searchQuery.toLowerCase());
+
+    const matchesStatus =
+      membershipFilter === 'All' ||
+      m.computedStatus === membershipFilter;
+
+    return matchesSearch && matchesStatus;
+  });
+
   // Export CSV
   const handleExportCsv = () => {
     let headers = [];
@@ -604,6 +772,24 @@ export default function AdminDashboard() {
         `"${(e.message || '').replace(/"/g, '""')}"`
       ]);
       fileName = 'royal_membership_enquiries.csv';
+    } else if (activeTab === 'memberships') {
+      headers = ['ID', 'Name', 'Email', 'Phone', 'Membership Plan', 'Join Date', 'Expiry Date', 'Remaining Days', 'Status'];
+      rows = calculatedMembers.map(e => {
+        const start = e.start_date || e.createdAt;
+        const expiry = e.expiry_date || '';
+        return [
+          e.id,
+          `"${e.name.replace(/"/g, '""')}"`,
+          e.email,
+          e.phone,
+          e.plan,
+          new Date(start).toLocaleDateString(),
+          new Date(expiry).toLocaleDateString(),
+          e.remainingDays,
+          e.computedStatus
+        ];
+      });
+      fileName = 'royal_gym_memberships.csv';
     } else {
       headers = ['ID', 'Name', 'Email', 'Phone', 'Subject', 'Created At', 'Message'];
       rows = contacts.map(c => [
@@ -902,40 +1088,69 @@ export default function AdminDashboard() {
 
         {/* Stats Summary Cards Row with Sophisticated Dark stat-card */}
         <div className="flex justify-between items-center bg-white/5 border border-white/5 p-3 rounded-lg">
-          <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400">Club Metrics Terminal</h3>
+          <h3 className="text-xs font-bold uppercase tracking-widest text-gray-400">
+            {activeTab === 'memberships' ? 'Membership Expiry Metrics Terminal' : 'Club Metrics Terminal'}
+          </h3>
           <div className="bg-white/5 px-3 py-0.5 rounded text-[9px] font-mono border border-white/10 text-rose-400">
-            LIVE_FEED_v2.0
+            {activeTab === 'memberships' ? 'EXPIRY_ENGINE_v1.0' : 'LIVE_FEED_v2.0'}
           </div>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-          <div className="p-5 stat-card rounded-xl">
-            <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Total Registrations</span>
-            <div className="text-3xl font-extrabold text-white mt-1 font-mono">{totalEnquiries}</div>
+        {activeTab === 'memberships' ? (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Total Members</span>
+              <div className="text-3xl font-extrabold text-white mt-1 font-mono">{totalApprovedMembers}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-green-400 uppercase tracking-widest font-bold">Active Members</span>
+              <div className="text-3xl font-extrabold text-green-400 mt-1 font-mono">{activeMembersCount}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-orange-400 uppercase tracking-widest font-bold">Expiring Soon (≤7d)</span>
+              <div className="text-3xl font-extrabold text-orange-400 mt-1 font-mono">{expiringSoonCount}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-red-500 uppercase tracking-widest font-bold">Expired Members</span>
+              <div className="text-3xl font-extrabold text-red-500 mt-1 font-mono">{expiredMembersCount}</div>
+            </div>
           </div>
-          <div className="p-5 stat-card rounded-xl">
-            <span className="text-[10px] text-green-400 uppercase tracking-widest font-bold">Approved</span>
-            <div className="text-3xl font-extrabold text-green-400 mt-1 font-mono">{approvedCount}</div>
+        ) : (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Total Registrations</span>
+              <div className="text-3xl font-extrabold text-white mt-1 font-mono">{totalEnquiries}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-green-400 uppercase tracking-widest font-bold">Approved</span>
+              <div className="text-3xl font-extrabold text-green-400 mt-1 font-mono">{approvedCount}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-yellow-400 uppercase tracking-widest font-bold">Pending Approval</span>
+              <div className="text-3xl font-extrabold text-yellow-400 mt-1 font-mono">{pendingCount}</div>
+            </div>
+            <div className="p-5 stat-card rounded-xl">
+              <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Contact Inbound</span>
+              <div className="text-3xl font-extrabold text-gray-400 mt-1 font-mono">{contacts.length}</div>
+            </div>
           </div>
-          <div className="p-5 stat-card rounded-xl">
-            <span className="text-[10px] text-yellow-400 uppercase tracking-widest font-bold">Pending Approval</span>
-            <div className="text-3xl font-extrabold text-yellow-400 mt-1 font-mono">{pendingCount}</div>
-          </div>
-          <div className="p-5 stat-card rounded-xl">
-            <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Contact Inbound</span>
-            <div className="text-3xl font-extrabold text-gray-400 mt-1 font-mono">{contacts.length}</div>
-          </div>
-        </div>
+        )}
 
         {/* Controls, Filter Tabs, and Export button */}
         <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-4 glass-panel p-4 rounded-xl">
           {/* Tabs */}
-          <div className="flex bg-dark-bg p-1 rounded-lg border border-dark-card-border">
+          <div className="flex bg-dark-bg p-1 rounded-lg border border-dark-card-border flex-wrap gap-1">
             <button
               onClick={() => { setActiveTab('enquiries'); setSearchQuery(''); }}
               className={`px-4 py-2 text-xs uppercase tracking-wider font-bold rounded-md transition-all ${activeTab === 'enquiries' ? 'bg-red-600 text-white shadow' : 'text-gray-400 hover:text-white'}`}
             >
               Enrolments ({totalEnquiries})
+            </button>
+            <button
+              onClick={() => { setActiveTab('memberships'); setSearchQuery(''); }}
+              className={`px-4 py-2 text-xs uppercase tracking-wider font-bold rounded-md transition-all ${activeTab === 'memberships' ? 'bg-red-600 text-white shadow' : 'text-gray-400 hover:text-white'}`}
+            >
+              Active Members ({totalApprovedMembers})
             </button>
             <button
               onClick={() => { setActiveTab('contacts'); setSearchQuery(''); }}
@@ -1084,6 +1299,146 @@ export default function AdminDashboard() {
                 ))}
               </div>
             )
+          ) : activeTab === 'memberships' ? (
+            <div className="space-y-6">
+              {/* Filter Row */}
+              <div className="flex flex-wrap items-center gap-2 pb-4 border-b border-dark-card-border/50">
+                <span className="text-xs text-gray-400 font-mono uppercase tracking-wider mr-2">Expiry Status Filter:</span>
+                {(['All', 'Active', 'Expiring Soon', 'Expired'] as const).map((status) => {
+                  const count = status === 'All' ? totalApprovedMembers :
+                                status === 'Active' ? activeMembersCount :
+                                status === 'Expiring Soon' ? expiringSoonCount :
+                                expiredMembersCount;
+                  return (
+                    <button
+                      key={status}
+                      onClick={() => setMembershipFilter(status)}
+                      className={`px-3 py-1.5 text-xs font-bold font-mono uppercase rounded transition-all cursor-pointer ${
+                        membershipFilter === status
+                          ? 'bg-red-600 text-white shadow-lg shadow-red-600/20'
+                          : 'bg-dark-bg text-gray-400 hover:text-white border border-dark-card-border'
+                      }`}
+                    >
+                      {status} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+
+              {filteredMembers.length === 0 ? (
+                <div className="text-center py-20 text-gray-500">
+                  <p className="font-display font-semibold text-lg text-white">No members matching filter</p>
+                  <p className="text-xs mt-1">Try changing your filter or search query.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-dark-card-border">
+                  <table className="w-full text-left border-collapse font-sans text-xs min-w-[800px]">
+                    <thead>
+                      <tr className="bg-white/[0.02] border-b border-dark-card-border/70 text-gray-400 font-mono uppercase tracking-wider text-[10px]">
+                        <th className="py-3 px-4 font-bold">Member Name</th>
+                        <th className="py-3 px-4 font-bold">Contact</th>
+                        <th className="py-3 px-4 font-bold">Plan</th>
+                        <th className="py-3 px-4 font-bold">Join Date</th>
+                        <th className="py-3 px-4 font-bold">Expiry Date</th>
+                        <th className="py-3 px-4 font-bold">Remaining Days</th>
+                        <th className="py-3 px-4 font-bold text-center">Status</th>
+                        <th className="py-3 px-4 font-bold text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-dark-card-border/30">
+                      {filteredMembers.map((member) => {
+                        const start = member.start_date || member.createdAt;
+                        const expiry = member.expiry_date || '';
+                        
+                        return (
+                          <tr key={member.id} className="hover:bg-white/[0.02] transition-colors">
+                            {/* Member Name */}
+                            <td className="py-4 px-4">
+                              <div className="font-bold text-white text-sm">{member.name}</div>
+                              <div className="text-[10px] text-gray-500 font-mono mt-0.5">{member.id}</div>
+                            </td>
+                            
+                            {/* Contact */}
+                            <td className="py-4 px-4 text-gray-300">
+                              <div>{member.email}</div>
+                              <div className="font-mono mt-0.5">{member.phone}</div>
+                            </td>
+                            
+                            {/* Plan */}
+                            <td className="py-4 px-4">
+                              <span className="px-2.5 py-0.5 bg-red-600/10 border border-red-500/20 text-red-400 rounded text-[10px] font-bold uppercase tracking-wider font-mono">
+                                {member.plan}
+                              </span>
+                            </td>
+                            
+                            {/* Join Date */}
+                            <td className="py-4 px-4 text-gray-300 font-mono">
+                              {new Date(start).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                            </td>
+                            
+                            {/* Expiry Date */}
+                            <td className="py-4 px-4 text-gray-300 font-mono">
+                              {expiry ? new Date(expiry).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A'}
+                            </td>
+                            
+                            {/* Remaining Days */}
+                            <td className="py-4 px-4 font-mono">
+                              <span className={`font-bold text-xs ${
+                                member.remainingDays <= 0 ? 'text-red-500' :
+                                member.remainingDays <= 7 ? 'text-orange-400' :
+                                'text-green-400'
+                              }`}>
+                                {member.remainingDays <= 0 ? 'Expired' : `${member.remainingDays} Days`}
+                              </span>
+                            </td>
+                            
+                            {/* Membership Status */}
+                            <td className="py-4 px-4 text-center">
+                              <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider font-mono ${
+                                member.computedStatus === 'Active' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                                member.computedStatus === 'Expiring Soon' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' :
+                                'bg-red-500/10 text-red-400 border border-red-500/20'
+                              }`}>
+                                {member.computedStatus === 'Active' ? '🟢 Active' :
+                                 member.computedStatus === 'Expiring Soon' ? '🟡 Expiring Soon' :
+                                 '🔴 Expired'}
+                              </span>
+                            </td>
+                            
+                            {/* Actions */}
+                            <td className="py-4 px-4 text-right">
+                              <div className="flex justify-end gap-2 items-center">
+                                <button
+                                  onClick={() => {
+                                    setRenewingMemberId(member.id);
+                                    setRenewalPlan(member.plan);
+                                  }}
+                                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] uppercase tracking-wider font-bold transition-colors cursor-pointer"
+                                >
+                                  Renew
+                                </button>
+                                
+                                <a
+                                  href={`https://wa.me/${member.phone}?text=Hello%20${encodeURIComponent(member.name)}!%20This%20is%20Shyam%20Rajput%20from%20Royal%20Fitness%20Club.%20Your%20membership%20status%20is%20currently%20${member.computedStatus}.`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="p-1.5 bg-green-500 hover:bg-green-600 text-white rounded flex items-center justify-center transition-colors"
+                                  title="WhatsApp Member"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5">
+                                    <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946C.06 5.348 5.397.01 12.008.01c3.202.001 6.212 1.246 8.477 3.514 2.266 2.268 3.507 5.28 3.505 8.484-.004 6.657-5.34 11.997-11.953 11.997-2.005-.001-3.973-.502-5.724-1.457L0 24zm6.59-4.846c1.6.95 3.188 1.449 4.825 1.451 5.436 0 9.86-4.37 9.864-9.799.002-2.63-1.023-5.101-2.885-6.968C16.38 2.016 13.908.993 11.278.993c-5.44 0-9.866 4.372-9.87 9.802 0 1.63.454 3.22 1.317 4.634l-.993 3.63 3.733-.966zm11.321-7.72c-.3-.149-1.772-.863-2.046-.962-.275-.099-.475-.149-.675.15-.199.3-.773.962-.948 1.16-.175.2-.35.226-.65.076-.3-.15-1.267-.461-2.413-1.471-.892-.786-1.493-1.758-1.668-2.056-.175-.3-.019-.462.131-.61.135-.134.3-.349.45-.523.15-.174.2-.3.3-.499.1-.2.05-.375-.025-.524-.075-.15-.675-1.608-.925-2.203-.243-.585-.49-.506-.675-.516-.174-.009-.374-.01-.574-.01s-.524.075-.798.374c-.275.3-1.047 1.012-1.047 2.47 0 1.457 1.073 2.865 1.223 3.064.15.2 2.111 3.178 5.113 4.466.714.306 1.272.489 1.708.626.717.224 1.37.193 1.886.117.575-.085 1.772-.714 2.022-1.405.25-.69.25-1.282.175-1.405-.075-.124-.275-.199-.575-.349z" />
+                                  </svg>
+                                </a>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           ) : (
             filteredContacts.length === 0 ? (
               <div className="text-center py-20 text-gray-500">
@@ -1145,6 +1500,57 @@ export default function AdminDashboard() {
             )
           )}
         </div>
+
+        {/* Renewal Modal */}
+        {renewingMemberId && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
+            <div className="w-full max-w-md bg-dark-bg border border-dark-card-border rounded-2xl p-6 shadow-2xl space-y-6">
+              <div>
+                <h3 className="font-display font-bold text-xl text-white">Renew Membership Plan</h3>
+                <p className="text-xs text-gray-400 mt-1">
+                  Select the membership tier package to renew. This resets the join date to today and calculates the new expiry.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-400 font-mono">
+                  Select Renewal Tier Package:
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  {(['Monthly', 'Quarterly', 'Half-Yearly', 'Yearly'] as const).map((plan) => (
+                    <button
+                      key={plan}
+                      type="button"
+                      onClick={() => setRenewalPlan(plan)}
+                      className={`px-4 py-3 text-xs font-bold font-mono uppercase rounded-xl border transition-all text-center cursor-pointer ${
+                        renewalPlan === plan
+                          ? 'bg-red-600/20 border-red-500 text-white'
+                          : 'bg-white/5 border-white/5 text-gray-400 hover:text-white hover:border-white/10'
+                      }`}
+                    >
+                      {plan}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setRenewingMemberId(null)}
+                  className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-lg text-xs uppercase tracking-wider font-bold transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleRenewMembership(renewingMemberId, renewalPlan)}
+                  className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs uppercase tracking-wider font-bold transition-all cursor-pointer"
+                >
+                  Confirm Renewal
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>

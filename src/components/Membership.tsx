@@ -35,7 +35,21 @@ export default function Membership() {
     setError(null);
     setSuccess(false);
 
+    const getPlanDays = (planName: string): number => {
+      switch (planName) {
+        case 'Monthly': return 30;
+        case 'Quarterly': return 90;
+        case 'Half-Yearly': return 180;
+        case 'Yearly': return 365;
+        default: return 30;
+      }
+    };
+
     const submissionId = 'enq_' + Math.random().toString(36).substr(2, 9);
+    const startDate = new Date();
+    const days = getPlanDays(formData.plan);
+    const expiryDate = new Date(startDate.getTime() + days * 24 * 60 * 60 * 1000);
+
     const submissionData = {
       id: submissionId,
       name: formData.name,
@@ -44,7 +58,9 @@ export default function Membership() {
       plan: formData.plan,
       message: formData.message || '',
       status: 'Pending',
-      created_at: new Date().toISOString()
+      created_at: startDate.toISOString(),
+      start_date: startDate.toISOString(),
+      expiry_date: expiryDate.toISOString()
     };
 
     console.log('[Membership Submission] Starting submit flow with details:', submissionData);

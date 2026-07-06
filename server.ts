@@ -97,6 +97,20 @@ app.post('/api/enquiries', async (req, res) => {
     return res.status(400).json({ error: 'All fields (name, email, phone, plan) are required.' });
   }
 
+  const getPlanDays = (planName: string): number => {
+    switch (planName) {
+      case 'Monthly': return 30;
+      case 'Quarterly': return 90;
+      case 'Half-Yearly': return 180;
+      case 'Yearly': return 365;
+      default: return 30;
+    }
+  };
+
+  const startDate = new Date();
+  const days = getPlanDays(plan);
+  const expiryDate = new Date(startDate.getTime() + days * 24 * 60 * 60 * 1000);
+
   const newEnquiry = {
     id: 'enq_' + Math.random().toString(36).substr(2, 9),
     name,
@@ -105,7 +119,9 @@ app.post('/api/enquiries', async (req, res) => {
     plan,
     message: message || '',
     status: 'Pending',
-    createdAt: new Date().toISOString()
+    createdAt: startDate.toISOString(),
+    start_date: startDate.toISOString(),
+    expiry_date: expiryDate.toISOString()
   };
 
   // If Supabase is active, try writing to it first
@@ -122,7 +138,9 @@ app.post('/api/enquiries', async (req, res) => {
           plan, 
           message: newEnquiry.message, 
           status: newEnquiry.status, 
-          created_at: newEnquiry.createdAt 
+          created_at: newEnquiry.createdAt,
+          start_date: newEnquiry.start_date,
+          expiry_date: newEnquiry.expiry_date
         }])
         .select();
 
@@ -144,7 +162,9 @@ app.post('/api/enquiries', async (req, res) => {
           plan, 
           message: newEnquiry.message, 
           status: newEnquiry.status, 
-          created_at: newEnquiry.createdAt 
+          created_at: newEnquiry.createdAt,
+          start_date: newEnquiry.start_date,
+          expiry_date: newEnquiry.expiry_date
         }])
         .select();
 
@@ -194,16 +214,29 @@ app.get('/api/enquiries', adminAuth, async (req, res) => {
       }
 
       if (!error && data) {
-        const mappedData = data.map((item: any) => ({
-          id: item.id,
-          name: item.name,
-          email: item.email,
-          phone: item.phone,
-          plan: item.plan,
-          message: item.message,
-          status: item.status,
-          createdAt: item.created_at || item.createdAt
-        }));
+        const mappedData = data.map((item: any) => {
+          const start = item.start_date || item.created_at || item.createdAt || new Date().toISOString();
+          const p = item.plan || 'Quarterly';
+          let days = 90;
+          if (p === 'Monthly') days = 30;
+          else if (p === 'Quarterly') days = 90;
+          else if (p === 'Half-Yearly') days = 180;
+          else if (p === 'Yearly') days = 365;
+          const expiry = item.expiry_date || new Date(new Date(start).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+
+          return {
+            id: item.id,
+            name: item.name,
+            email: item.email,
+            phone: item.phone,
+            plan: item.plan,
+            message: item.message,
+            status: item.status,
+            createdAt: item.created_at || item.createdAt,
+            start_date: start,
+            expiry_date: expiry
+          };
+        });
         return res.json(mappedData);
       }
       console.warn('⚠️ Supabase read failed entirely, falling back to local database logs:', error?.message);
@@ -213,19 +246,45 @@ app.get('/api/enquiries', adminAuth, async (req, res) => {
   }
 
   const db = readLocalDb();
-  const sorted = [...db.enquiries].sort((a: any, b: any) => 
+  const sorted = [...db.enquiries].map((item: any) => {
+    const start = item.start_date || item.createdAt || new Date().toISOString();
+    const p = item.plan || 'Quarterly';
+    let days = 90;
+    if (p === 'Monthly') days = 30;
+    else if (p === 'Quarterly') days = 90;
+    else if (p === 'Half-Yearly') days = 180;
+    else if (p === 'Yearly') days = 365;
+    const expiry = item.expiry_date || new Date(new Date(start).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+
+    return {
+      ...item,
+      start_date: start,
+      expiry_date: expiry
+    };
+  }).sort((a: any, b: any) => 
     new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   res.json(sorted);
 });
 
-// Update enquiry status (Admin approve/reject)
+// Update enquiry status, plan, start_date, expiry_date (Admin approve/reject/renew)
 app.put('/api/enquiries/:id', adminAuth, async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body; // 'Approved' | 'Rejected' | 'Pending'
+  const { status, plan, start_date, expiry_date } = req.body;
 
-  if (!['Approved', 'Rejected', 'Pending'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid status' });
+  const updateFields: any = {};
+  if (status !== undefined) {
+    if (!['Approved', 'Rejected', 'Pending'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    updateFields.status = status;
+  }
+  if (plan !== undefined) updateFields.plan = plan;
+  if (start_date !== undefined) updateFields.start_date = start_date;
+  if (expiry_date !== undefined) updateFields.expiry_date = expiry_date;
+
+  if (Object.keys(updateFields).length === 0) {
+    return res.status(400).json({ error: 'No fields to update' });
   }
 
   if (supabase) {
@@ -233,7 +292,7 @@ app.put('/api/enquiries/:id', adminAuth, async (req, res) => {
       // Try gym_memberships first
       let { data, error } = await supabase
         .from('gym_memberships')
-        .update({ status })
+        .update(updateFields)
         .eq('id', id)
         .select();
 
@@ -241,7 +300,7 @@ app.put('/api/enquiries/:id', adminAuth, async (req, res) => {
         console.warn('⚠️ Supabase gym_memberships update failed/empty, falling back to enquiries table...');
         const fallback = await supabase
           .from('enquiries')
-          .update({ status })
+          .update(updateFields)
           .eq('id', id)
           .select();
         data = fallback.data;
@@ -260,7 +319,10 @@ app.put('/api/enquiries/:id', adminAuth, async (req, res) => {
   const db = readLocalDb();
   const index = db.enquiries.findIndex((e: any) => e.id === id);
   if (index !== -1) {
-    db.enquiries[index].status = status;
+    db.enquiries[index] = {
+      ...db.enquiries[index],
+      ...updateFields
+    };
     writeLocalDb(db);
     res.json({ success: true, updated: db.enquiries[index] });
   } else {

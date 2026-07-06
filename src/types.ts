@@ -3,10 +3,12 @@ export interface MembershipEnquiry {
   name: string;
   email: string;
   phone: string;
-  plan: 'Monthly' | 'Quarterly' | 'Yearly';
+  plan: string;
   message?: string;
   status: 'Pending' | 'Approved' | 'Rejected';
   createdAt: string;
+  start_date?: string;
+  expiry_date?: string;
 }
 
 export interface ContactMessage {
