@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '../lib/supabase';
 
 export default function Contact() {
   const [formData, setFormData] = useState({
@@ -24,30 +25,89 @@ export default function Contact() {
     setError(null);
     setSuccess(false);
 
-    try {
-      const response = await fetch('/api/contacts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(formData)
-      });
+    const submissionId = 'cnt_' + Math.random().toString(36).substr(2, 9);
+    const submissionData = {
+      id: submissionId,
+      name: formData.name,
+      email: formData.email,
+      phone: formData.phone,
+      subject: formData.subject,
+      message: formData.message || '',
+      created_at: new Date().toISOString()
+    };
 
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || 'Failed to send message. Please try again.');
+    console.log('[Contact Submission] Starting submit flow with details:', submissionData);
+
+    try {
+      let isSubmitted = false;
+
+      // Path 1: Direct Supabase Insertion (Priority - Serverless / Local-Free)
+      if (supabase) {
+        console.log('[Contact Submission] Attempting direct Supabase insert into table: contacts');
+        try {
+          const { error: cntError } = await supabase
+            .from('contacts')
+            .insert([submissionData]);
+
+          if (!cntError) {
+            console.log('[Contact Submission] Direct Supabase insert into contacts table succeeded!');
+            isSubmitted = true;
+          } else {
+            console.warn('[Contact Submission] Direct insert into contacts table failed:', cntError.message);
+          }
+        } catch (sbErr: any) {
+          console.error('[Contact Submission] Direct Supabase insert attempt threw an exception:', sbErr);
+        }
       }
 
-      setSuccess(true);
-      setFormData({
-        name: '',
-        email: '',
-        phone: '',
-        subject: '',
-        message: ''
-      });
+      // Path 2: Fallback to backend API if Supabase is unavailable or failed
+      if (!isSubmitted) {
+        console.log('[Contact Submission] Direct Supabase inserts unavailable or failed. Attempting API route POST to /api/contacts...');
+        const response = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(formData)
+        });
+
+        if (response.ok) {
+          console.log('[Contact Submission] API route submission success!');
+          isSubmitted = true;
+        } else {
+          let apiErrorMsg = 'Failed to submit via API.';
+          try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errData = await response.json();
+              apiErrorMsg = errData.error || apiErrorMsg;
+            } else {
+              const textErr = await response.text();
+              console.error('[Contact Submission] API HTML/Non-JSON error response received:', textErr);
+              apiErrorMsg = `Server error (${response.status}): ${textErr.substring(0, 100)}...`;
+            }
+          } catch (parseErr) {
+            console.error('[Contact Submission] Error parsing API error:', parseErr);
+          }
+          throw new Error(apiErrorMsg);
+        }
+      }
+
+      if (isSubmitted) {
+        setSuccess(true);
+        setFormData({
+          name: '',
+          email: '',
+          phone: '',
+          subject: '',
+          message: ''
+        });
+      } else {
+        throw new Error('Database submission failed. Please verify your Supabase tables are set up.');
+      }
     } catch (err: any) {
-      setError(err.message || 'Server error. Please try again.');
+      console.error('[Contact Submission] Submission error occurred:', err);
+      setError(err.message || 'An unexpected connection error occurred. Please verify your Supabase tables are set up.');
     } finally {
       setLoading(false);
     }

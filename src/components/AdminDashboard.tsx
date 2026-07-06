@@ -74,6 +74,23 @@ CREATE POLICY "Allow all access" ON contacts FOR ALL USING (true);
 -- Enable Real-time Postgres Changes
 ALTER PUBLICATION supabase_realtime ADD TABLE contacts;`;
 
+const ADMIN_CONFIG_SQL = `-- Create admin_config table
+CREATE TABLE IF NOT EXISTS admin_config (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- Insert default admin PIN
+INSERT INTO admin_config (key, value)
+VALUES ('admin_pin', 'admin123')
+ON CONFLICT (key) DO NOTHING;
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE admin_config ENABLE ROW LEVEL SECURITY;
+
+-- Policy to allow anyone to read the admin PIN for login
+CREATE POLICY "Allow public read of admin_pin" ON admin_config FOR SELECT USING (true);`;
+
 export default function AdminDashboard() {
   const [pinInput, setPinInput] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -94,21 +111,32 @@ export default function AdminDashboard() {
   const [copiedGymMemberships, setCopiedGymMemberships] = useState(false);
   const [copiedEnquiries, setCopiedEnquiries] = useState(false);
   const [copiedContacts, setCopiedContacts] = useState(false);
+  const [copiedAdminConfig, setCopiedAdminConfig] = useState(false);
 
   // Fetch Supabase configuration on mount
   useEffect(() => {
     const fetchConfig = async () => {
+      // Direct frontend check first (Serverless & Free)
+      const clientUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://vkwsivnvcyqjtjryjyyg.supabase.co';
+      const isClientActive = !!clientUrl && !clientUrl.includes('your-supabase-project');
+      
+      setSupabaseConfig({
+        active: isClientActive,
+        url: clientUrl
+      });
+
+      // Also try backend config endpoint as backup
       try {
         const res = await fetch('/api/config');
         if (res.ok) {
           const data = await res.json();
           setSupabaseConfig({
-            active: data.supabaseActive,
-            url: data.supabaseUrl || ''
+            active: data.supabaseActive || isClientActive,
+            url: data.supabaseUrl || clientUrl
           });
         }
       } catch (err) {
-        console.error('Error fetching config:', err);
+        console.log('[Admin Dashboard] Backend config endpoint not reachable (running serverless/SPA mode). Using client-side config.');
       }
     };
     fetchConfig();
@@ -120,23 +148,78 @@ export default function AdminDashboard() {
     setLoading(true);
     setError(null);
 
+    console.log('[Admin Login] Starting PIN verification flow for pin:', pinInput);
+
     try {
-      const response = await fetch('/api/admin/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinInput })
-      });
+      // Path 1: Check direct Supabase query first (100% Free of Backend Server Dependency)
+      if (supabase) {
+        console.log('[Admin Login] Attempting direct Supabase query for admin_config table...');
+        try {
+          const { data, error: sbError } = await supabase
+            .from('admin_config')
+            .select('value')
+            .eq('key', 'admin_pin');
 
-      const data = await response.json();
+          if (sbError) {
+            console.warn('[Admin Login] Supabase admin_config query returned error:', sbError.message);
+          } else if (data && data.length > 0) {
+            const fetchedPin = data[0].value;
+            if (fetchedPin === pinInput) {
+              console.log('[Admin Login] Direct Supabase admin_config PIN verification success!');
+              setIsAuthenticated(true);
+              setAdminPin(pinInput);
+              return;
+            } else {
+              console.warn('[Admin Login] Supabase PIN mismatch.');
+              setError('Invalid Admin PIN. Please try again.');
+              return;
+            }
+          } else {
+            console.log('[Admin Login] No admin_config table records found in Supabase.');
+          }
+        } catch (queryErr: any) {
+          console.error('[Admin Login] Querying admin_config threw exception:', queryErr);
+        }
+      }
 
-      if (response.ok && data.success) {
+      // Path 2: API route fallback (only if Express server is running)
+      console.log('[Admin Login] Attempting fallback backend API verify route POST to /api/admin/verify...');
+      try {
+        const response = await fetch('/api/admin/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: pinInput })
+        });
+
+        if (response.ok) {
+          const apiData = await response.json();
+          if (apiData.success) {
+            console.log('[Admin Login] Fallback API route verification success!');
+            setIsAuthenticated(true);
+            setAdminPin(pinInput);
+            return;
+          }
+        }
+      } catch (fetchErr) {
+        console.log('[Admin Login] Backend API verify route unreachable (running serverless/SPA mode).');
+      }
+
+      // Path 3: Client-side local environment / static PIN fallback (Critical for instant Serverless/Vercel support!)
+      const clientSideEnvPin = (import.meta as any).env?.VITE_ADMIN_PIN;
+      console.log('[Admin Login] Backend API and database PIN lookup skipped/unreached. Performing static fallback...');
+      
+      const expectedStaticPin = clientSideEnvPin || 'admin123';
+      if (pinInput === expectedStaticPin) {
+        console.log('[Admin Login] Static fallback PIN verification success!');
         setIsAuthenticated(true);
         setAdminPin(pinInput);
-      } else {
-        setError(data.error || 'Invalid Admin PIN. Please try again.');
+        return;
       }
-    } catch (err) {
-      setError('Connection error. Is the server running?');
+
+      setError('Invalid Admin PIN. Please try again.');
+    } catch (err: any) {
+      console.error('[Admin Login] Error during PIN verification process:', err);
+      setError(`Login failed: ${err.message || 'Connection error. Please verify your Supabase settings.'}`);
     } finally {
       setLoading(false);
     }
@@ -190,28 +273,117 @@ export default function AdminDashboard() {
 
     const fetchRecords = async () => {
       setLoading(true);
+      setError(null);
+      console.log('[Admin Dashboard] fetchRecords called. Triggering load...');
+
       try {
-        // Enquiries/Memberships fetch
-        console.log('[Admin Dashboard] Fetching registrations...');
+        let enqData: MembershipEnquiry[] = [];
+        let cntData: ContactMessage[] = [];
+        let fetchedFromSupabase = false;
+
+        // Path 1: Direct Supabase Fetch (Zero local server dependency!)
+        if (supabase) {
+          try {
+            console.log('[Admin Dashboard] Fetching registrations directly from Supabase...');
+            
+            // Try gym_memberships primary table first
+            let { data: gymData, error: gymError } = await supabase
+              .from('gym_memberships')
+              .select('*')
+              .order('created_at', { ascending: false });
+
+            if (gymError) {
+              console.warn('[Admin Dashboard] gym_memberships table read failed:', gymError.message);
+              console.log('[Admin Dashboard] Attempting read from fallback enquiries table...');
+              const { data: fallbackData, error: fallbackError } = await supabase
+                .from('enquiries')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+              if (fallbackError) {
+                console.error('[Admin Dashboard] Both gym_memberships and enquiries tables failed to fetch directly:', fallbackError.message);
+              } else if (fallbackData) {
+                gymData = fallbackData;
+                gymError = null;
+              }
+            }
+
+            if (!gymError && gymData) {
+              enqData = gymData.map((item: any) => ({
+                id: item.id,
+                name: item.name,
+                email: item.email,
+                phone: item.phone,
+                plan: item.plan,
+                message: item.message || '',
+                status: item.status,
+                createdAt: item.created_at || item.createdAt
+              }));
+              fetchedFromSupabase = true;
+              console.log('[Admin Dashboard] Registrations fetched successfully from Supabase:', enqData.length, 'records');
+            }
+
+            // Fetch contacts directly from Supabase
+            console.log('[Admin Dashboard] Fetching contacts directly from Supabase...');
+            const { data: contactsData, error: contactsError } = await supabase
+              .from('contacts')
+              .select('*')
+              .order('created_at', { ascending: false });
+
+            if (!contactsError && contactsData) {
+              cntData = contactsData.map((item: any) => ({
+                id: item.id,
+                name: item.name,
+                email: item.email,
+                phone: item.phone,
+                subject: item.subject,
+                message: item.message || '',
+                createdAt: item.created_at || item.createdAt
+              }));
+              fetchedFromSupabase = true;
+              console.log('[Admin Dashboard] Contacts fetched successfully from Supabase:', cntData.length, 'records');
+            } else if (contactsError) {
+              console.error('[Admin Dashboard] Contacts table failed to fetch directly:', contactsError.message);
+            }
+
+            if (fetchedFromSupabase) {
+              setEnquiries(enqData);
+              setContacts(cntData);
+              return; // Successfully loaded directly from Supabase!
+            }
+          } catch (sbFetchErr: any) {
+            console.error('[Admin Dashboard] Error during direct Supabase queries:', sbFetchErr);
+          }
+        }
+
+        // Path 2: Fallback to backend API
+        console.log('[Admin Dashboard] Supabase direct fetch skipped or failed. Falling back to backend API endpoints...');
+        
+        // Enquiries fetch
         const enqResponse = await fetch('/api/enquiries', {
           headers: { 'x-admin-pin': adminPin }
         });
         if (enqResponse.ok) {
-          const enqData = await enqResponse.json();
-          setEnquiries(enqData);
+          const apiEnq = await enqResponse.json();
+          setEnquiries(apiEnq);
+        } else {
+          console.warn('[Admin Dashboard] Backend API /api/enquiries returned non-OK status:', enqResponse.status);
         }
 
         // Contacts fetch
-        console.log('[Admin Dashboard] Fetching contacts...');
         const cntResponse = await fetch('/api/contacts', {
           headers: { 'x-admin-pin': adminPin }
         });
         if (cntResponse.ok) {
-          const cntData = await cntResponse.json();
-          setContacts(cntData);
+          const apiCnt = await cntResponse.json();
+          setContacts(apiCnt);
+        } else {
+          console.warn('[Admin Dashboard] Backend API /api/contacts returned non-OK status:', cntResponse.status);
         }
-      } catch (err) {
-        console.error('[Admin Dashboard] Error loading records:', err);
+
+      } catch (err: any) {
+        console.error('[Admin Dashboard] Error in fetchRecords:', err);
+        setError(`Failed to retrieve records: ${err.message || 'Please check your connection and configuration.'}`);
       } finally {
         setLoading(false);
       }
@@ -222,26 +394,75 @@ export default function AdminDashboard() {
 
   // Approve / Reject Enquiry Status
   const handleUpdateStatus = async (id: string, newStatus: 'Approved' | 'Rejected') => {
+    console.log('[Admin Dashboard] Updating registration status. ID:', id, 'New Status:', newStatus);
+    
     try {
-      const response = await fetch(`/api/enquiries/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-pin': adminPin
-        },
-        body: JSON.stringify({ status: newStatus })
-      });
+      let updatedSuccess = false;
 
-      if (response.ok) {
+      // Path 1: Direct Supabase Update
+      if (supabase) {
+        console.log('[Admin Dashboard] Attempting direct Supabase status update in gym_memberships table...');
+        try {
+          let { data, error } = await supabase
+            .from('gym_memberships')
+            .update({ status: newStatus })
+            .eq('id', id)
+            .select();
+
+          if (error || !data || data.length === 0) {
+            console.warn('[Admin Dashboard] Direct update in gym_memberships failed, trying enquiries fallback table...');
+            const fallback = await supabase
+              .from('enquiries')
+              .update({ status: newStatus })
+              .eq('id', id)
+              .select();
+            data = fallback.data;
+            error = fallback.error;
+          }
+
+          if (!error && data && data.length > 0) {
+            console.log('[Admin Dashboard] Direct Supabase status update succeeded!');
+            updatedSuccess = true;
+          } else if (error) {
+            console.error('[Admin Dashboard] Direct Supabase status update failed completely:', error.message);
+          }
+        } catch (sbErr: any) {
+          console.error('[Admin Dashboard] Exception during direct Supabase status update:', sbErr);
+        }
+      }
+
+      // Path 2: API route fallback (only if direct Supabase update did not execute/succeed)
+      if (!updatedSuccess) {
+        console.log('[Admin Dashboard] Falling back to backend API route for status update...');
+        const response = await fetch(`/api/enquiries/${id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-pin': adminPin
+          },
+          body: JSON.stringify({ status: newStatus })
+        });
+
+        if (response.ok) {
+          console.log('[Admin Dashboard] API route status update succeeded!');
+          updatedSuccess = true;
+        } else {
+          const errText = await response.text();
+          console.error('[Admin Dashboard] API route status update failed:', errText);
+        }
+      }
+
+      if (updatedSuccess) {
         // Optimistic State update
         setEnquiries((prev) =>
           prev.map((item) => (item.id === id ? { ...item, status: newStatus } : item))
         );
       } else {
-        alert('Failed to update status.');
+        alert('Failed to update status. Please make sure the table exists or check permissions.');
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error('[Admin Dashboard] Error updating status:', err);
+      alert(`Error updating status: ${err.message}`);
     }
   };
 
@@ -249,19 +470,61 @@ export default function AdminDashboard() {
   const handleDeleteEnquiry = async (id: string) => {
     if (!window.confirm('Are you absolutely sure you want to permanently delete this membership enquiry?')) return;
 
-    try {
-      const response = await fetch(`/api/enquiries/${id}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-pin': adminPin }
-      });
+    console.log('[Admin Dashboard] Deleting registration. ID:', id);
 
-      if (response.ok) {
+    try {
+      let deletedSuccess = false;
+
+      // Path 1: Direct Supabase Delete
+      if (supabase) {
+        console.log('[Admin Dashboard] Attempting direct Supabase delete from gym_memberships table...');
+        try {
+          const { error: gymError } = await supabase
+            .from('gym_memberships')
+            .delete()
+            .eq('id', id);
+
+          const { error: enqError } = await supabase
+            .from('enquiries')
+            .delete()
+            .eq('id', id);
+
+          if (!gymError || !enqError) {
+            console.log('[Admin Dashboard] Direct Supabase delete succeeded!');
+            deletedSuccess = true;
+          } else {
+            console.error('[Admin Dashboard] Direct Supabase delete failed on both tables:', gymError?.message, enqError?.message);
+          }
+        } catch (sbErr: any) {
+          console.error('[Admin Dashboard] Exception during direct Supabase delete:', sbErr);
+        }
+      }
+
+      // Path 2: API route fallback
+      if (!deletedSuccess) {
+        console.log('[Admin Dashboard] Falling back to backend API route for deletion...');
+        const response = await fetch(`/api/enquiries/${id}`, {
+          method: 'DELETE',
+          headers: { 'x-admin-pin': adminPin }
+        });
+
+        if (response.ok) {
+          console.log('[Admin Dashboard] API route delete succeeded!');
+          deletedSuccess = true;
+        } else {
+          const errText = await response.text();
+          console.error('[Admin Dashboard] API route delete failed:', errText);
+        }
+      }
+
+      if (deletedSuccess) {
         setEnquiries((prev) => prev.filter((item) => item.id !== id));
       } else {
         alert('Failed to delete enquiry.');
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error('[Admin Dashboard] Error deleting enquiry:', err);
+      alert(`Error: ${err.message}`);
     }
   };
 
@@ -269,19 +532,56 @@ export default function AdminDashboard() {
   const handleDeleteContact = async (id: string) => {
     if (!window.confirm('Are you absolutely sure you want to permanently delete this contact query?')) return;
 
-    try {
-      const response = await fetch(`/api/contacts/${id}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-pin': adminPin }
-      });
+    console.log('[Admin Dashboard] Deleting contact query. ID:', id);
 
-      if (response.ok) {
+    try {
+      let deletedSuccess = false;
+
+      // Path 1: Direct Supabase Delete
+      if (supabase) {
+        console.log('[Admin Dashboard] Attempting direct Supabase delete from contacts table...');
+        try {
+          const { error } = await supabase
+            .from('contacts')
+            .delete()
+            .eq('id', id);
+
+          if (!error) {
+            console.log('[Admin Dashboard] Direct Supabase delete from contacts table succeeded!');
+            deletedSuccess = true;
+          } else {
+            console.error('[Admin Dashboard] Direct Supabase delete from contacts failed:', error.message);
+          }
+        } catch (sbErr: any) {
+          console.error('[Admin Dashboard] Exception during direct contacts delete:', sbErr);
+        }
+      }
+
+      // Path 2: API route fallback
+      if (!deletedSuccess) {
+        console.log('[Admin Dashboard] Falling back to backend API route for contact deletion...');
+        const response = await fetch(`/api/contacts/${id}`, {
+          method: 'DELETE',
+          headers: { 'x-admin-pin': adminPin }
+        });
+
+        if (response.ok) {
+          console.log('[Admin Dashboard] API route contact delete succeeded!');
+          deletedSuccess = true;
+        } else {
+          const errText = await response.text();
+          console.error('[Admin Dashboard] API route contact delete failed:', errText);
+        }
+      }
+
+      if (deletedSuccess) {
         setContacts((prev) => prev.filter((item) => item.id !== id));
       } else {
         alert('Failed to delete contact query.');
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error('[Admin Dashboard] Error deleting contact query:', err);
+      alert(`Error deleting contact query: ${err.message}`);
     }
   };
 
@@ -514,7 +814,7 @@ export default function AdminDashboard() {
                   </ol>
                 </div>
 
-                <div className="grid md:grid-cols-3 gap-6">
+                <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
                   {/* Gym Memberships Table Setup */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
@@ -572,6 +872,26 @@ export default function AdminDashboard() {
                     </div>
                     <pre className="p-3 bg-black/60 border border-white/5 rounded-lg text-[10px] font-mono text-gray-400 overflow-x-auto max-h-48 leading-relaxed">
                       {CONTACTS_SQL}
+                    </pre>
+                  </div>
+
+                  {/* Admin Config Table Setup */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-red-400 uppercase tracking-wider">4. Admin Config SQL</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(ADMIN_CONFIG_SQL);
+                          setCopiedAdminConfig(true);
+                          setTimeout(() => setCopiedAdminConfig(false), 2000);
+                        }}
+                        className="px-2.5 py-1 bg-red-600/10 hover:bg-red-600 border border-red-600/30 text-red-400 hover:text-white rounded text-[10px] uppercase tracking-wider font-bold transition-all cursor-pointer"
+                      >
+                        {copiedAdminConfig ? 'Copied!' : 'Copy SQL'}
+                      </button>
+                    </div>
+                    <pre className="p-3 bg-black/60 border border-white/5 rounded-lg text-[10px] font-mono text-gray-400 overflow-x-auto max-h-48 leading-relaxed">
+                      {ADMIN_CONFIG_SQL}
                     </pre>
                   </div>
                 </div>

@@ -50,19 +50,74 @@ export default function Membership() {
     console.log('[Membership Submission] Starting submit flow with details:', submissionData);
 
     try {
-      // Path 1: Submit to backend API first
-      console.log('[Membership Submission] Attempting API route POST to /api/enquiries...');
-      const response = await fetch('/api/enquiries', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(formData)
-      });
+      let isSubmitted = false;
 
-      if (response.ok) {
-        const data = await response.json();
-        console.log('[Membership Submission] API route submission success!', data);
+      // Path 1: Direct Supabase Insertion (Priority - Serverless / Local-Free)
+      if (supabase) {
+        console.log('[Membership Submission] Attempting direct Supabase insert into primary table: gym_memberships');
+        try {
+          const { error: gymError } = await supabase
+            .from('gym_memberships')
+            .insert([submissionData]);
+
+          if (!gymError) {
+            console.log('[Membership Submission] Direct Supabase insert into gym_memberships table succeeded!');
+            isSubmitted = true;
+          } else {
+            console.warn('[Membership Submission] Direct insert into gym_memberships failed:', gymError.message);
+            console.log('[Membership Submission] Retrying with backup table: enquiries...');
+            
+            const { error: enqError } = await supabase
+              .from('enquiries')
+              .insert([submissionData]);
+
+            if (!enqError) {
+              console.log('[Membership Submission] Direct Supabase insert into enquiries table succeeded!');
+              isSubmitted = true;
+            } else {
+              console.warn('[Membership Submission] Direct insert into backup enquiries table failed:', enqError.message);
+            }
+          }
+        } catch (sbErr: any) {
+          console.error('[Membership Submission] Direct Supabase insert attempt threw an exception:', sbErr);
+        }
+      }
+
+      // Path 2: Fallback to backend API if Supabase is unavailable or failed
+      if (!isSubmitted) {
+        console.log('[Membership Submission] Direct Supabase inserts unavailable or failed. Attempting API route POST to /api/enquiries...');
+        const response = await fetch('/api/enquiries', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(formData)
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log('[Membership Submission] API route submission success!', data);
+          isSubmitted = true;
+        } else {
+          let apiErrorMsg = 'Failed to submit via API.';
+          try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errData = await response.json();
+              apiErrorMsg = errData.error || apiErrorMsg;
+            } else {
+              const textErr = await response.text();
+              console.error('[Membership Submission] API HTML/Non-JSON error response received:', textErr);
+              apiErrorMsg = `Server error (${response.status}): ${textErr.substring(0, 100)}...`;
+            }
+          } catch (parseErr) {
+            console.error('[Membership Submission] Error parsing API error:', parseErr);
+          }
+          throw new Error(apiErrorMsg);
+        }
+      }
+
+      if (isSubmitted) {
         setSuccess(true);
         // Reset form
         setFormData({
@@ -72,72 +127,8 @@ export default function Membership() {
           plan: 'Quarterly',
           message: ''
         });
-        return;
-      }
-
-      // Handle backend API non-OK responses
-      let apiErrorMsg = 'Failed to submit via API.';
-      try {
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const errData = await response.json();
-          apiErrorMsg = errData.error || apiErrorMsg;
-        } else {
-          const textErr = await response.text();
-          console.error('[Membership Submission] API HTML/Non-JSON error response received:', textErr);
-          apiErrorMsg = `Server error (${response.status}): ${textErr.substring(0, 100)}...`;
-        }
-      } catch (parseErr) {
-        console.error('[Membership Submission] Error parsing API error:', parseErr);
-      }
-
-      console.warn(`[Membership Submission] Backend API submission failed (${apiErrorMsg}). Falling back to direct Supabase client-side insert...`);
-
-      // Path 2: Direct Supabase fallback
-      if (supabase) {
-        console.log('[Membership Submission] Attempting direct Supabase insert into table: gym_memberships');
-        const { error: gymError } = await supabase
-          .from('gym_memberships')
-          .insert([submissionData]);
-
-        if (!gymError) {
-          console.log('[Membership Submission] Direct Supabase insert into gym_memberships table succeeded!');
-          setSuccess(true);
-          setFormData({
-            name: '',
-            email: '',
-            phone: '',
-            plan: 'Quarterly',
-            message: ''
-          });
-          return;
-        }
-
-        console.warn('[Membership Submission] Direct insert into gym_memberships table failed:', gymError.message);
-        console.log('[Membership Submission] Retrying with backup table: enquiries');
-
-        const { error: enqError } = await supabase
-          .from('enquiries')
-          .insert([submissionData]);
-
-        if (!enqError) {
-          console.log('[Membership Submission] Direct Supabase insert into enquiries table succeeded!');
-          setSuccess(true);
-          setFormData({
-            name: '',
-            email: '',
-            phone: '',
-            plan: 'Quarterly',
-            message: ''
-          });
-          return;
-        }
-
-        // Both direct tables failed, throw Supabase details
-        console.error('[Membership Submission] Direct Supabase insertion failed completely for both tables.');
-        throw new Error(`Database submission failed: ${gymError.message || enqError.message}`);
       } else {
-        throw new Error(apiErrorMsg);
+        throw new Error('Database submission failed. Please verify your Supabase tables are set up.');
       }
 
     } catch (err: any) {
