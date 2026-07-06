@@ -1,0 +1,192 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  /* Light Mode (Clean White and Blue Fitness Aesthetic) */
+  --color-theme-bg: #f8fafc; /* slate-50 */
+  --color-theme-card: #ffffff;
+  --color-theme-card-border: rgba(15, 23, 42, 0.08);
+  
+  --color-brand-primary: #2563eb; /* Blue-600 */
+  --color-brand-primary-hover: #1d4ed8; /* Blue-700 */
+  --color-brand-primary-dark: #1e40af; /* Blue-800 */
+  --color-brand-primary-bg-tint: rgba(37, 99, 235, 0.08);
+  
+  --color-theme-text-primary: #0f172a; /* Slate-900 */
+  --color-theme-text-secondary: #334155; /* Slate-700 */
+  --color-theme-text-tertiary: #475569; /* Slate-600 */
+  --color-theme-text-quaternary: #64748b; /* Slate-500 */
+}
+
+.dark {
+  /* Dark Mode (Premium Black, Charcoal, and Red Fitness Aesthetic) */
+  --color-theme-bg: #050505;
+  --color-theme-card: rgba(20, 20, 20, 0.8);
+  --color-theme-card-border: rgba(255, 255, 255, 0.1);
+  
+  --color-brand-primary: #e11d48; /* Red-600 */
+  --color-brand-primary-hover: #be123c; /* Red-700 */
+  --color-brand-primary-dark: #9f1239; /* Red-800 */
+  --color-brand-primary-bg-tint: rgba(225, 29, 72, 0.08);
+  
+  --color-theme-text-primary: #ffffff;
+  --color-theme-text-secondary: #f3f4f6; /* Gray-100 */
+  --color-theme-text-tertiary: #d1d5db; /* Gray-300 */
+  --color-theme-text-quaternary: #9ca3af; /* Gray-400 */
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-dark-bg: var(--color-theme-bg);
+  --color-dark-card: var(--color-theme-card);
+  --color-dark-card-border: var(--color-theme-card-border);
+  
+  /* Map standard colors used in codebase dynamically to transition with themes */
+  --color-red-500: var(--color-brand-primary);
+  --color-red-600: var(--color-brand-primary);
+  --color-red-700: var(--color-brand-primary-hover);
+  --color-red-950: var(--color-brand-primary-bg-tint);
+  
+  --color-white: var(--color-theme-text-primary);
+  --color-gray-100: var(--color-theme-text-secondary);
+  --color-gray-300: var(--color-theme-text-tertiary);
+  --color-gray-400: var(--color-theme-text-quaternary);
+}
+
+@layer base {
+  body {
+    background-color: var(--color-dark-bg);
+    color: var(--color-white);
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+  }
+  
+  /* Perfect smooth color and shadow transitions for all elements when changing theme */
+  *, *::before, *::after {
+    transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, box-shadow, opacity;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 300ms;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-dark-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-dark-card-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-red-600);
+}
+
+/* Glassmorphism Classes and Sophisticated Dark Helpers */
+.glass-panel {
+  background: var(--color-dark-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-dark-card-border);
+}
+
+.admin-row:hover {
+  background: var(--color-brand-primary-bg-tint);
+}
+
+.stat-card {
+  border-left: 4px solid var(--color-red-600);
+  background-color: var(--color-dark-card);
+  border-top: 1px solid var(--color-dark-card-border);
+  border-right: 1px solid var(--color-dark-card-border);
+  border-bottom: 1px solid var(--color-dark-card-border);
+}
+
+.accent-red {
+  color: var(--color-red-600);
+}
+
+.bg-accent-red {
+  background-color: var(--color-red-600);
+}
+
+.border-accent-red {
+  border-color: var(--color-red-600);
+}
+
+.text-stroke-red {
+  -webkit-text-stroke: 1px var(--color-red-600);
+  color: transparent;
+}
+
+/* Glowing Effects in Dark Mode */
+.dark .stat-card {
+  box-shadow: 0 4px 20px -2px rgba(225, 29, 72, 0.05);
+}
+
+.dark .glass-panel {
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.dark #hero-join-btn,
+.dark #registration-submit-btn,
+.dark #contact-submit-btn,
+.dark #bmi-calculate-btn,
+.dark #admin-verify-submit-btn {
+  box-shadow: 0 0 15px rgba(225, 29, 72, 0.35);
+}
+
+/* Crisp shadow designs in Light Mode */
+:root .stat-card {
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.04);
+}
+
+:root .glass-panel {
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05), 0 8px 10px -6px rgba(15, 23, 42, 0.05);
+}
+
+:root #hero-join-btn,
+:root #registration-submit-btn,
+:root #contact-submit-btn,
+:root #bmi-calculate-btn,
+:root #admin-verify-submit-btn {
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.15);
+}
+
+/* Page Loader styling */
+.page-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background-color: #050505;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+}
+
+/* Image Skeleton Loader styling */
+.skeleton-loader {
+  background: linear-gradient(90deg, var(--color-dark-card-border) 25%, rgba(128, 128, 128, 0.1) 50%, var(--color-dark-card-border) 75%);
+  background-size: 200% 100%;
+  animation: loading-skeleton 1.5s infinite;
+}
+
+@keyframes loading-skeleton {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
