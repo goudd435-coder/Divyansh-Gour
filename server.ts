@@ -111,7 +111,30 @@ app.post('/api/enquiries', async (req, res) => {
   // If Supabase is active, try writing to it first
   if (supabase) {
     try {
-      const { data, error } = await supabase
+      console.log('[Server] Attempting Supabase insertion into primary table: gym_memberships');
+      const { data, error: gymError } = await supabase
+        .from('gym_memberships')
+        .insert([{ 
+          id: newEnquiry.id,
+          name, 
+          email, 
+          phone, 
+          plan, 
+          message: newEnquiry.message, 
+          status: newEnquiry.status, 
+          created_at: newEnquiry.createdAt 
+        }])
+        .select();
+
+      if (!gymError) {
+        console.log('✅ Registration successfully stored in Supabase (gym_memberships).');
+        return res.status(201).json(newEnquiry);
+      }
+
+      console.warn('⚠️ Primary table gym_memberships insert failed, attempting enquiries table:', gymError.message);
+
+      // Attempt backup enquiries table
+      const { data: enqData, error: enqError } = await supabase
         .from('enquiries')
         .insert([{ 
           id: newEnquiry.id,
@@ -125,18 +148,25 @@ app.post('/api/enquiries', async (req, res) => {
         }])
         .select();
 
-      if (!error) {
-        console.log('✅ Enquiry stored in Supabase.');
+      if (!enqError) {
+        console.log('✅ Registration successfully stored in Supabase (enquiries).');
         return res.status(201).json(newEnquiry);
-      } else {
-        console.warn('⚠️ Supabase insert failed, falling back to local DB:', error.message);
       }
+
+      // If both tables failed on an active Supabase config, report the error to the user
+      console.error('❌ Supabase insertion failed completely:', enqError.message);
+      return res.status(400).json({ 
+        error: `Supabase database error: ${gymError.message || enqError.message}. Please check your SQL setup and RLS policies.` 
+      });
+
     } catch (err: any) {
-      console.warn('⚠️ Supabase connection error, falling back to local DB:', err.message);
+      console.error('❌ Unhandled backend error inserting into Supabase:', err.message);
+      return res.status(500).json({ error: `Internal connection error: ${err.message}` });
     }
   }
 
-  // Fallback to local DB
+  // Fallback to local DB ONLY if Supabase is not configured
+  console.log('[Server] Supabase is inactive. Saving registration to local JSON file...');
   const db = readLocalDb();
   db.enquiries.push(newEnquiry);
   writeLocalDb(db);
@@ -147,10 +177,21 @@ app.post('/api/enquiries', async (req, res) => {
 app.get('/api/enquiries', adminAuth, async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from('enquiries')
+      console.log('[Server] Admin read request: Fetching from Supabase table gym_memberships...');
+      let { data, error } = await supabase
+        .from('gym_memberships')
         .select('*')
         .order('created_at', { ascending: false });
+
+      if (error) {
+        console.warn('⚠️ Supabase gym_memberships read failed, falling back to enquiries table:', error.message);
+        const fallback = await supabase
+          .from('enquiries')
+          .select('*')
+          .order('created_at', { ascending: false });
+        data = fallback.data;
+        error = fallback.error;
+      }
 
       if (!error && data) {
         const mappedData = data.map((item: any) => ({
@@ -165,14 +206,13 @@ app.get('/api/enquiries', adminAuth, async (req, res) => {
         }));
         return res.json(mappedData);
       }
-      console.warn('⚠️ Supabase read failed, reading from local DB');
-    } catch (err) {
-      console.warn('⚠️ Supabase connection error, reading from local DB');
+      console.warn('⚠️ Supabase read failed entirely, falling back to local database logs:', error?.message);
+    } catch (err: any) {
+      console.warn('⚠️ Supabase read connection error:', err.message);
     }
   }
 
   const db = readLocalDb();
-  // Sort descending by date
   const sorted = [...db.enquiries].sort((a: any, b: any) => 
     new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
@@ -190,18 +230,30 @@ app.put('/api/enquiries/:id', adminAuth, async (req, res) => {
 
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from('enquiries')
+      // Try gym_memberships first
+      let { data, error } = await supabase
+        .from('gym_memberships')
         .update({ status })
         .eq('id', id)
         .select();
 
+      if (error || !data || data.length === 0) {
+        console.warn('⚠️ Supabase gym_memberships update failed/empty, falling back to enquiries table...');
+        const fallback = await supabase
+          .from('enquiries')
+          .update({ status })
+          .eq('id', id)
+          .select();
+        data = fallback.data;
+        error = fallback.error;
+      }
+
       if (!error && data && data.length > 0) {
         return res.json({ success: true, updated: data[0] });
       }
-      console.warn('⚠️ Supabase update failed, updating locally');
-    } catch (err) {
-      console.warn('⚠️ Supabase update error, updating locally');
+      console.warn('⚠️ Supabase update failed on both tables, updating locally instead');
+    } catch (err: any) {
+      console.warn('⚠️ Supabase update connection error:', err.message);
     }
   }
 
@@ -222,17 +274,22 @@ app.delete('/api/enquiries/:id', adminAuth, async (req, res) => {
 
   if (supabase) {
     try {
-      const { error } = await supabase
+      const { error: gymError } = await supabase
+        .from('gym_memberships')
+        .delete()
+        .eq('id', id);
+
+      const { error: enqError } = await supabase
         .from('enquiries')
         .delete()
         .eq('id', id);
 
-      if (!error) {
+      if (!gymError || !enqError) {
         return res.json({ success: true, message: 'Deleted from Supabase' });
       }
-      console.warn('⚠️ Supabase delete failed, deleting locally');
-    } catch (err) {
-      console.warn('⚠️ Supabase delete error, deleting locally');
+      console.warn('⚠️ Supabase delete failed, deleting locally...');
+    } catch (err: any) {
+      console.warn('⚠️ Supabase delete connection error:', err.message);
     }
   }
 

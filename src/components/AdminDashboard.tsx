@@ -1,8 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { MembershipEnquiry, ContactMessage } from '../types';
+import { supabase } from '../lib/supabase';
 
-const ENQUIRIES_SQL = `-- Create enquiries table
+const GYM_MEMBERSHIPS_SQL = `-- Create gym_memberships table
+CREATE TABLE IF NOT EXISTS gym_memberships (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  message TEXT,
+  status TEXT NOT NULL DEFAULT 'Pending',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE gym_memberships ENABLE ROW LEVEL SECURITY;
+
+-- Policy to allow anyone to register/insert from frontend
+CREATE POLICY "Allow anonymous inserts" ON gym_memberships FOR INSERT WITH CHECK (true);
+
+-- Policy to allow full read/write access for admin
+CREATE POLICY "Allow all access" ON gym_memberships FOR ALL USING (true);
+
+-- Enable Real-time Postgres Changes
+ALTER PUBLICATION supabase_realtime ADD TABLE gym_memberships;`;
+
+const ENQUIRIES_SQL = `-- Create enquiries table (Backup Table)
 CREATE TABLE IF NOT EXISTS enquiries (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -14,14 +39,17 @@ CREATE TABLE IF NOT EXISTS enquiries (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable RLS
+-- Enable Row Level Security (RLS)
 ALTER TABLE enquiries ENABLE ROW LEVEL SECURITY;
 
--- Allow public anonymous submissions
+-- Policy to allow anyone to register/insert from frontend
 CREATE POLICY "Allow anonymous inserts" ON enquiries FOR INSERT WITH CHECK (true);
 
--- Allow full access for all operations (Admin dashboard/API backend)
-CREATE POLICY "Allow all access" ON enquiries FOR ALL USING (true);`;
+-- Policy to allow full read/write access for admin
+CREATE POLICY "Allow all access" ON enquiries FOR ALL USING (true);
+
+-- Enable Real-time Postgres Changes
+ALTER PUBLICATION supabase_realtime ADD TABLE enquiries;`;
 
 const CONTACTS_SQL = `-- Create contacts table
 CREATE TABLE IF NOT EXISTS contacts (
@@ -34,14 +62,17 @@ CREATE TABLE IF NOT EXISTS contacts (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable RLS
+-- Enable Row Level Security (RLS)
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 
--- Allow public anonymous submissions
+-- Policy to allow anyone to submit contact requests
 CREATE POLICY "Allow anonymous inserts" ON contacts FOR INSERT WITH CHECK (true);
 
--- Allow full access for all operations (Admin dashboard/API backend)
-CREATE POLICY "Allow all access" ON contacts FOR ALL USING (true);`;
+-- Policy to allow full read/write access for admin
+CREATE POLICY "Allow all access" ON contacts FOR ALL USING (true);
+
+-- Enable Real-time Postgres Changes
+ALTER PUBLICATION supabase_realtime ADD TABLE contacts;`;
 
 export default function AdminDashboard() {
   const [pinInput, setPinInput] = useState('');
@@ -60,6 +91,7 @@ export default function AdminDashboard() {
   // Supabase connection status state
   const [supabaseConfig, setSupabaseConfig] = useState<{ active: boolean; url: string } | null>(null);
   const [showSqlSetup, setShowSqlSetup] = useState(false);
+  const [copiedGymMemberships, setCopiedGymMemberships] = useState(false);
   const [copiedEnquiries, setCopiedEnquiries] = useState(false);
   const [copiedContacts, setCopiedContacts] = useState(false);
 
@@ -110,6 +142,48 @@ export default function AdminDashboard() {
     }
   };
 
+  // Setup Real-time updates subscription
+  useEffect(() => {
+    if (!isAuthenticated || !supabase) return;
+
+    console.log('[Admin Dashboard] Initializing real-time subscription channels...');
+
+    const channel = supabase
+      .channel('supabase-admin-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'gym_memberships' },
+        (payload) => {
+          console.log('[Real-time Update] Received gym_memberships event:', payload.eventType);
+          setRefreshTrigger((prev) => prev + 1);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'enquiries' },
+        (payload) => {
+          console.log('[Real-time Update] Received enquiries event:', payload.eventType);
+          setRefreshTrigger((prev) => prev + 1);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'contacts' },
+        (payload) => {
+          console.log('[Real-time Update] Received contacts event:', payload.eventType);
+          setRefreshTrigger((prev) => prev + 1);
+        }
+      )
+      .subscribe((status) => {
+        console.log('[Real-time Subscription] Channel status:', status);
+      });
+
+    return () => {
+      console.log('[Admin Dashboard] Cleaning up real-time channels...');
+      supabase.removeChannel(channel);
+    };
+  }, [isAuthenticated]);
+
   // Fetch Dashboard Records
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -117,7 +191,8 @@ export default function AdminDashboard() {
     const fetchRecords = async () => {
       setLoading(true);
       try {
-        // Enquiries fetch
+        // Enquiries/Memberships fetch
+        console.log('[Admin Dashboard] Fetching registrations...');
         const enqResponse = await fetch('/api/enquiries', {
           headers: { 'x-admin-pin': adminPin }
         });
@@ -127,6 +202,7 @@ export default function AdminDashboard() {
         }
 
         // Contacts fetch
+        console.log('[Admin Dashboard] Fetching contacts...');
         const cntResponse = await fetch('/api/contacts', {
           headers: { 'x-admin-pin': adminPin }
         });
@@ -135,7 +211,7 @@ export default function AdminDashboard() {
           setContacts(cntData);
         }
       } catch (err) {
-        console.error('Error loading admin records:', err);
+        console.error('[Admin Dashboard] Error loading records:', err);
       } finally {
         setLoading(false);
       }
@@ -438,11 +514,31 @@ export default function AdminDashboard() {
                   </ol>
                 </div>
 
-                <div className="grid md:grid-cols-2 gap-6">
+                <div className="grid md:grid-cols-3 gap-6">
+                  {/* Gym Memberships Table Setup */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-white uppercase tracking-wider text-green-400">1. Gym Memberships SQL (Primary)</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(GYM_MEMBERSHIPS_SQL);
+                          setCopiedGymMemberships(true);
+                          setTimeout(() => setCopiedGymMemberships(false), 2000);
+                        }}
+                        className="px-2.5 py-1 bg-red-600/10 hover:bg-red-600 border border-red-600/30 text-red-400 hover:text-white rounded text-[10px] uppercase tracking-wider font-bold transition-all cursor-pointer"
+                      >
+                        {copiedGymMemberships ? 'Copied!' : 'Copy SQL'}
+                      </button>
+                    </div>
+                    <pre className="p-3 bg-black/60 border border-white/5 rounded-lg text-[10px] font-mono text-gray-400 overflow-x-auto max-h-48 leading-relaxed">
+                      {GYM_MEMBERSHIPS_SQL}
+                    </pre>
+                  </div>
+
                   {/* Enquiries Table Setup */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <span className="text-xs font-bold text-white uppercase tracking-wider">1. Enquiries Table SQL</span>
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">2. Enquiries SQL (Backup)</span>
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(ENQUIRIES_SQL);
@@ -462,7 +558,7 @@ export default function AdminDashboard() {
                   {/* Contacts Table Setup */}
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <span className="text-xs font-bold text-white uppercase tracking-wider">2. Contacts Table SQL</span>
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">3. Contacts SQL</span>
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(CONTACTS_SQL);
