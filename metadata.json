@@ -1,0 +1,6 @@
+{
+  "name": "Royal Fitness Club",
+  "description": "Premium gym in Sarangpur, Madhya Pradesh. Experience world-class fitness, personal training, yoga, and state-of-the-art equipment with a modern dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
