@@ -5,7 +5,7 @@ export interface MembershipEnquiry {
   phone: string;
   plan: string;
   message?: string;
-  status: 'Pending' | 'Approved' | 'Rejected';
+  status: 'Pending' | 'Approved' | 'Rejected' | 'Active';
   createdAt: string;
   start_date?: string;
   expiry_date?: string;

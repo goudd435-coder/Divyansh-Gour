@@ -39,57 +39,43 @@ export default function Contact() {
     console.log('[Contact Submission] Starting submit flow with details:', submissionData);
 
     try {
-      let isSubmitted = false;
-
-      // Path 1: Direct Supabase Insertion (Priority - Serverless / Local-Free)
-      if (supabase) {
-        console.log('[Contact Submission] Attempting direct Supabase insert into table: contacts');
-        try {
-          const { error: cntError } = await supabase
-            .from('contacts')
-            .insert([submissionData]);
-
-          if (!cntError) {
-            console.log('[Contact Submission] Direct Supabase insert into contacts table succeeded!');
-            isSubmitted = true;
-          } else {
-            console.warn('[Contact Submission] Direct insert into contacts table failed:', cntError.message);
-          }
-        } catch (sbErr: any) {
-          console.error('[Contact Submission] Direct Supabase insert attempt threw an exception:', sbErr);
-        }
+      if (!supabase) {
+        throw new Error('Supabase client is not initialized. Please verify your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY environment variables.');
       }
 
-      // Path 2: Fallback to backend API if Supabase is unavailable or failed
-      if (!isSubmitted) {
-        console.log('[Contact Submission] Direct Supabase inserts unavailable or failed. Attempting API route POST to /api/contacts...');
-        const response = await fetch('/api/contacts', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(formData)
-        });
+      let isSubmitted = false;
+      let lastErrorMsg = '';
 
-        if (response.ok) {
-          console.log('[Contact Submission] API route submission success!');
-          isSubmitted = true;
-        } else {
-          let apiErrorMsg = 'Failed to submit via API.';
-          try {
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-              const errData = await response.json();
-              apiErrorMsg = errData.error || apiErrorMsg;
-            } else {
-              const textErr = await response.text();
-              console.error('[Contact Submission] API HTML/Non-JSON error response received:', textErr);
-              apiErrorMsg = `Server error (${response.status}): ${textErr.substring(0, 100)}...`;
-            }
-          } catch (parseErr) {
-            console.error('[Contact Submission] Error parsing API error:', parseErr);
+      console.log('[Contact Submission] Inserting message directly into Supabase "contacts" table...');
+      const { data: cntData, error: cntError } = await supabase
+        .from('contacts')
+        .insert([submissionData])
+        .select();
+
+      if (!cntError) {
+        console.log('[Contact Submission] Insert into "contacts" table succeeded!', cntData);
+        isSubmitted = true;
+      } else {
+        console.warn('[Contact Submission] Direct insert into "contacts" failed:', cntError);
+        lastErrorMsg = cntError.message;
+      }
+
+      // If running on local dev server only, attempt API fallback
+      const isLocalDev = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      if (!isSubmitted && isLocalDev) {
+        console.log('[Contact Submission] Attempting local backend API POST to /api/contacts...');
+        try {
+          const response = await fetch('/api/contacts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formData)
+          });
+          if (response.ok) {
+            console.log('[Contact Submission] API route submission success!');
+            isSubmitted = true;
           }
-          throw new Error(apiErrorMsg);
+        } catch (fetchErr) {
+          console.warn('[Contact Submission] Local API server not reachable.');
         }
       }
 
@@ -103,7 +89,8 @@ export default function Contact() {
           message: ''
         });
       } else {
-        throw new Error('Database submission failed. Please verify your Supabase tables are set up.');
+        console.error('[Contact Submission Failure] Supabase Error:', lastErrorMsg);
+        throw new Error(`Supabase Error: ${lastErrorMsg || 'Failed to submit contact message'}. Please check table RLS policies.`);
       }
     } catch (err: any) {
       console.error('[Contact Submission] Submission error occurred:', err);

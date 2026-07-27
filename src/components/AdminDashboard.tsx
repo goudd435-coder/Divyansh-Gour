@@ -316,16 +316,35 @@ export default function AdminDashboard() {
             }
 
             if (!gymError && gymData) {
-              enqData = gymData.map((item: any) => ({
-                id: item.id,
-                name: item.name,
-                email: item.email,
-                phone: item.phone,
-                plan: item.plan,
-                message: item.message || '',
-                status: item.status,
-                createdAt: item.created_at || item.createdAt
-              }));
+              enqData = gymData.map((item: any) => {
+                const start = item.start_date || item.created_at || item.createdAt || new Date().toISOString();
+                let expiry = item.expiry_date;
+                if (!expiry) {
+                  const getPlanDays = (p: string): number => {
+                    switch (p) {
+                      case 'Monthly': return 30;
+                      case 'Quarterly': return 90;
+                      case 'Half-Yearly': return 180;
+                      case 'Yearly': return 365;
+                      default: return 30;
+                    }
+                  };
+                  const days = getPlanDays(item.plan || 'Monthly');
+                  expiry = new Date(new Date(start).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+                }
+                return {
+                  id: item.id,
+                  name: item.name || '',
+                  email: item.email || '',
+                  phone: item.phone || '',
+                  plan: item.plan || 'Monthly',
+                  message: item.message || '',
+                  status: item.status || 'Active',
+                  createdAt: item.created_at || item.createdAt || start,
+                  start_date: start,
+                  expiry_date: expiry
+                };
+              });
               fetchedFromSupabase = true;
               console.log('[Admin Dashboard] Registrations fetched successfully from Supabase:', enqData.length, 'records');
             }
@@ -715,8 +734,8 @@ export default function AdminDashboard() {
     return 'Active';
   };
 
-  // Select all approved members
-  const approvedMembers = enquiries.filter(e => e.status === 'Approved');
+  // Select all approved and active members
+  const approvedMembers = enquiries.filter(e => e.status === 'Approved' || e.status === 'Active');
 
   // Multi-level calculations for approved members
   const calculatedMembers = approvedMembers.map(m => {
