@@ -124,7 +124,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     const fetchConfig = async () => {
       // Direct frontend check first (Serverless & Free)
-      const clientUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://vkwsivnvcyqjtjryjyyg.supabase.co';
+      const clientUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://oklchtictngrlpvyxezb.supabase.co';
       const isClientActive = !!clientUrl && !clientUrl.includes('your-supabase-project');
       
       setSupabaseConfig({
@@ -1012,7 +1012,7 @@ export default function AdminDashboard() {
                 <div className="bg-black/40 p-4 rounded-xl border border-white/5">
                   <h4 className="font-semibold text-white text-xs uppercase tracking-widest mb-1.5 font-mono text-red-500">How to Setup Supabase Database Tables</h4>
                   <ol className="list-decimal pl-5 text-xs space-y-1.5 text-gray-400 leading-relaxed">
-                    <li>Log in to your <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-red-500 hover:underline">Supabase Dashboard</a> and open project <strong className="text-white">{supabaseConfig.url.split('//')[1]?.split('.')[0] || 'vkwsivnvcyqjtjryjyyg'}</strong>.</li>
+                    <li>Log in to your <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-red-500 hover:underline">Supabase Dashboard</a> and open project <strong className="text-white">{supabaseConfig.url.split('//')[1]?.split('.')[0] || 'oklchtictngrlpvyxezb'}</strong>.</li>
                     <li>Go to the <strong>SQL Editor</strong> tab in the left sidebar.</li>
                     <li>Click <strong>New Query</strong>, copy and paste the SQL scripts below, and click <strong>Run</strong> to create the tables.</li>
                     <li>Row-Level Security (RLS) is automatically enabled to allow public website registrations (anonymous inserts) and full access for this client.</li>

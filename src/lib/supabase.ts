@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const defaultUrl = 'https://vkwsivnvcyqjtjryjyyg.supabase.co';
-const defaultAnonKey = 'sb_publishable_4LRk-9FmcX73WXx5u0jedw_C4f4XSFX';
+const defaultUrl = 'https://oklchtictngrlpvyxezb.supabase.co';
+const defaultAnonKey = 'sb_publishable_DGmXGKFbAay2cM2yimrmag_LXx2vxjm';
 
 function isValidUrl(url: string | undefined): boolean {
   if (!url) return false;
